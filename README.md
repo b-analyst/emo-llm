@@ -32,7 +32,9 @@ plotters_3.ipynb : To study effect of prompt template
 plotters_4.ipynb : To study the isomorphic control task
 ```
 
-## Citation
+## 📄 Citation
+Our paper was accepted to **ACL 2025** in Vienna Austria.  
+
 If you found our paper helpful, please cite us as:
 
 ```
