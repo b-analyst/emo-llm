@@ -33,7 +33,10 @@ plotters_4.ipynb : To study the isomorphic control task
 ```
 
 ## 📄 Citation
-Our paper was accepted to **ACL 2025** in Vienna Austria.  
+Our paper is accepted to **ACL 2025** in Vienna Austria.  
+You can find it in the official program here:  
+🔗 [https://2025.aclweb.org/program/find_papers/](https://2025.aclweb.org/program/find_papers/)
+
 
 If you found our paper helpful, please cite us as:
 
