@@ -422,12 +422,25 @@ def extract_hidden_states(dataloader, tokenizer, model, logger,
     
     tokenized_input = []
     
+    # Pre-determine max sequence length if using auto mode
+    if extraction_tokens == 'auto':
+        max_length = 0
+        for batch_texts, _ in dataloader:
+            # Add padding to handle variable lengths within batch during pre-scan
+            temp_inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=258)
+            max_length = max(max_length, temp_inputs['input_ids'].shape[1])
+        # Add some buffer but cap at memory-safe limit
+        max_length = min(max_length + 10, 128)  # Cap at 128 tokens to prevent VRAM explosion
+    else:
+        max_length = None
+    
     for i, (batch_texts, _) in tqdm(enumerate(dataloader), total=len(dataloader)):
 
         inputs = tokenizer(
             batch_texts,
-            padding='longest',
-            truncation=False,
+            padding='max_length' if max_length else 'longest',
+            max_length=max_length,
+            truncation=True,  # Add truncation to prevent super long sequences
             return_tensors="pt",
         ).to(model.device)
 
@@ -436,9 +449,17 @@ def extract_hidden_states(dataloader, tokenizer, model, logger,
 
         cache_dict_ = outputs[1]
 
+        # Determine extraction tokens - now all sequences are padded to same length
+        if extraction_tokens == 'auto' or extraction_tokens is None:
+            # Extract all token positions since they're all padded to same length
+            seq_length = inputs['input_ids'].shape[1]
+            current_extraction_tokens = list(range(seq_length))
+        else:
+            current_extraction_tokens = extraction_tokens
+
         r = extract_from_cache(cache_dict_, extraction_layers=extraction_layers,
                           extraction_locs=extraction_locs,
-                          extraction_tokens=extraction_tokens)
+                          extraction_tokens=current_extraction_tokens)
         
         return_values.append(r)
         

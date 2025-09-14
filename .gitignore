@@ -20,3 +20,5 @@ __pycache__/
 outputs/*/filtered_train_data.csv
 figs/*.pdf
 *.pdf
+probe_results/
+experiments/
