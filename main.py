@@ -9,7 +9,7 @@ from prompt_manager import build_prompt, build_prompt_first_word_prediction
 from utils import (Log, log_system_info, hf_login,
                    find_token_length_distribution, TextDataset, get_emotion_logits, emotion_to_token_ids,
                    probe_classification, probe_classification_non_linear, extract_hidden_states, apply_zero_intervention_and_extract_logits, apply_random_intervention_and_extract_logits,
-                   activation_patching, probe_regression, make_projections, promote_vec, seed_everywhere, apply_probes_on_hs)
+                   activation_patching, probe_regression, make_projections, promote_vec, seed_everywhere, apply_probes_on_hs, probe_binary_relevance)
 
 
 ##############################################################################################
@@ -258,8 +258,16 @@ if args.emotion_probing:
         for j, loc in enumerate (extraction_locs):
             results[layer][loc] = {}
             for k, token in enumerate (extraction_tokens):
-                results[layer][loc][token] = probe_classification(all_hidden_states[:, i, j, k], labels[:, 0], return_weights=True)
-                
+                # results[layer][loc][token] = probe_classification(all_hidden_states[:, i, j, k], labels[:, 0], return_weights=True)
+                results[layer][loc][token] = probe_binary_relevance(
+                    all_hidden_states[:, i, j, k],
+                    labels[:, 0],
+                    emotions_list=emotions_list,
+                    return_weights=True,
+                    Normalize_X=True,
+                    C_grid=[0.01, 0.1, 1.0, 10.0, 100.0],
+                    max_iter=5000
+                )
 
     torch.save(results, f'outputs/{model_short_name}/emotion_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
