@@ -22,10 +22,10 @@ parser.add_argument("--bs", type=int, default=4, help="Batch Size")
 parser.add_argument("--prompt_type", type=str, default='joy_sadness_0')
 parser.add_argument("--task_type", type=str, default='Emotion', choices=['Emotion', 'FirstWord'])
 
-parser.add_argument("--open_vocab", action="store_true", default=True, help="Generate open vocab predictions")
-parser.add_argument("--in_domain", action="store_true", default=True, help="Generate in-domain emotion labels and filter the dataset to only keep the samples with correctly predicted labels.")
+parser.add_argument("--open_vocab", action="store_true", default=False, help="Generate open vocab predictions")
+parser.add_argument("--in_domain", action="store_true", default=False, help="Generate in-domain emotion labels and filter the dataset to only keep the samples with correctly predicted labels.")
 parser.add_argument("--bbox_emotion_regression", action="store_true", default=True, help="Perform black-box emotion regression using appraisals, i.e. use appraisals as features to predict emotion labels")
-parser.add_argument("--save_clean_logits", action="store_true", default=True, help="Save the original clean logits")
+parser.add_argument("--save_clean_logits", action="store_true", default=False, help="Save the original clean logits")
 
 parser.add_argument("--extract_hidden_states", action="store_true", default=False, help="Extract hidden states")
 parser.add_argument("--emotion_probing", action="store_true", default=True, help="Perform emotion probing")
