@@ -273,7 +273,6 @@ if args.emotion_probing:
     logger.info(f"Hidden states tensor size: {size_on_memory / (1024 ** 2):.2f} MB")
 
     results = {}
-    global_steps = 0
     for i, layer in tqdm(enumerate (extraction_layers), total=len(extraction_layers)):
         logger.info(f"Starting binary probes for layer {layer}")
         results[layer] = {}
@@ -313,8 +312,7 @@ if args.emotion_probing:
                             # optional: training diagnostics (not for generalization)
                             log_dict[f'train_f1/{cls_name}'] = stats['train_f1']
 
-                        wandb.log(log_dict, step=global_steps)
-                        global_steps += 1
+                        wandb.log(log_dict)
                 else:
                     res = probe_classification(
                         all_hidden_states[:, i, j, k],
@@ -329,8 +327,8 @@ if args.emotion_probing:
                             'token': token,
                             'acc/train': float(res['accuracy_train']),
                             'acc/test': float(res['accuracy_test']),
-                        }, step=global_steps)
-                        global_steps += 1
+                        })
+
         logger.info(f"Finished binary probes for layer {layer}")
 
     # choose filename based on mode
