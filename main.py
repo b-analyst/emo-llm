@@ -27,7 +27,7 @@ parser.add_argument("--in_domain", action="store_true", default=True, help="Gene
 parser.add_argument("--bbox_emotion_regression", action="store_true", default=True, help="Perform black-box emotion regression using appraisals, i.e. use appraisals as features to predict emotion labels")
 parser.add_argument("--save_clean_logits", action="store_true", default=True, help="Save the original clean logits")
 
-parser.add_argument("--extract_hidden_states", action="store_true", default=True, help="Extract hidden states")
+parser.add_argument("--extract_hidden_states", action="store_true", default=False, help="Extract hidden states")
 parser.add_argument("--emotion_probing", action="store_true", default=True, help="Perform emotion probing")
 parser.add_argument("--emotion_probing_non_linear", action="store_true", default=True, help="Perform emotion probing")
 parser.add_argument("--appraisal_probing", action="store_true", default=True, help="Perform appraisal probing")
