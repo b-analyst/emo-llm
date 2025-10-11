@@ -22,3 +22,5 @@ figs/*.pdf
 *.pdf
 probe_results/
 experiments/
+experiment/
+*experiment/

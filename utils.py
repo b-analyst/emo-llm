@@ -260,9 +260,10 @@ def probe(all_hidden_states, labels, appraisals, logger):
 
 def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weights=False, Normalize_X=False,
                            C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42, n_jobs=-1):
-    from sklearn.model_selection import StratifiedKFold
+    from sklearn.model_selection import StratifiedKFold, GridSearchCV
     from sklearn.preprocessing import StandardScaler
-    from sklearn.linear_model import LogisticRegressionCV
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
 
     if isinstance(all_hidden_states, torch.Tensor):
         X = all_hidden_states.cpu().numpy().reshape(all_hidden_states.shape[0], -1)
@@ -274,11 +275,7 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
     else:
         y = np.asarray(labels)
 
-    if Normalize_X:
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X)
-
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
 
     per_class = {}
     W, b = [], []
@@ -286,24 +283,34 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
     for cls_idx, cls_name in enumerate(emotions_list):
         y_bin = (y == cls_idx).astype(int)
 
-        best = LogisticRegressionCV(
-            Cs=C_grid,
-            cv=skf,
+        steps = []
+        if Normalize_X:
+            steps.append(('scaler', StandardScaler()))
+        steps.append(('clf', LogisticRegression(
             solver='liblinear',
             class_weight='balanced',
-            scoring='roc_auc',
             max_iter=max_iter,
+            random_state=random_state,
+        )))
+        pipe = Pipeline(steps)
+
+        param_grid = {'clf__C': C_grid}
+        grid = GridSearchCV(
+            estimator=pipe,
+            param_grid=param_grid,
+            scoring='roc_auc',
+            cv=skf,
             n_jobs=n_jobs,
-            refit=True,  # LR-CV refits with best C on full data
+            refit=True,
+            return_train_score=False
         )
-        best.fit(X, y_bin)
+        grid.fit(X, y_bin)
 
-        # CV AUC (mean over folds, for the positive class if available)
-        key = 1 if 1 in best.scores_ else list(best.scores_.keys())[0]
-        cv_roc_auc = float(best.scores_[key].mean())
+        # Mean CV AUC at the selected C (no leakage; scaler fit inside each fold)
+        cv_roc_auc = float(grid.best_score_)
 
-        # Train metrics on full data
-        y_prob = best.predict_proba(X)[:, 1]
+        # Train metrics on full data with the refit best estimator
+        y_prob = grid.predict_proba(X)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
 
         per_class[cls_name] = {
@@ -312,11 +319,13 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
             'train_f1': float(f1_score(y_bin, y_pred, zero_division=0)),
             'train_roc_auc': float(roc_auc_score(y_bin, y_prob)),
             'train_pr_auc': float(average_precision_score(y_bin, y_prob)),
-            'best_C': float(best.C_[0]),
+            'best_C': float(grid.best_params_['clf__C']),
         }
 
-        W.append(best.coef_.ravel())
-        b.append(float(best.intercept_.ravel()[0]))
+        print(f"{cls_name}: {per_class[cls_name]}")
+
+        W.append(grid.best_estimator_.named_steps['clf'].coef_.ravel())
+        b.append(float(grid.best_estimator_.named_steps['clf'].intercept_.ravel()[0]))
 
     W = np.stack(W, axis=0)
     b = np.asarray(b)
