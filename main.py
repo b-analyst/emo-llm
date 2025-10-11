@@ -31,7 +31,9 @@ parser.add_argument("--extract_hidden_states", action="store_true", default=Fals
 parser.add_argument("--emotion_probing", action="store_true", default=True, help="Perform emotion probing")
 parser.add_argument("--emotion_probing_non_linear", action="store_true", default=True, help="Perform emotion probing")
 parser.add_argument("--appraisal_probing", action="store_true", default=True, help="Perform appraisal probing")
-
+parser.add_argument("--emotion_probing_binary", action="store_true", default=False,
+                    help="Train one-vs-rest binary classifiers for emotion probing and save with 'binary' in filename")
+                    
 parser.add_argument("--extract_weights", action="store_true", default=True, help="Extract weights from probes")
 parser.add_argument("--zero_intervention", action="store_true", default=True, help="Perform zero intervention")
 parser.add_argument("--random_intervention", action="store_true", default=True, help="Perform random intervention")
@@ -53,7 +55,7 @@ BATCH_SIZE = args.bs
 HOOKED = True
 device_map = 'cuda'
 
-os.makedirs('outputs/', exist_ok=True)
+os.makedirs('outputs/algoverse/', exist_ok=True)
 
 train_data = pd.read_csv('data/enVent_gen_Data.csv', encoding='ISO-8859-1')
 train_data['emotion'] = train_data['emotion'].replace('no-emotion', 'neutral')
@@ -153,7 +155,7 @@ else:
 
 model_short_name =  args.path_prefix + model_short_name + args.path_suffix
 
-os.makedirs(f'outputs/{model_short_name}', exist_ok=True)
+os.makedirs(f'outputs/algoverse/{model_short_name}', exist_ok=True)
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side='left')
 if tokenizer.pad_token is None:
@@ -181,25 +183,25 @@ if args.open_vocab:
     preds = tokenizer.batch_decode(open_vocab_preds, skip_special_tokens=True)
     gt = [' ' + id_to_emotion[i.item()] for i in labels[:, 0]]
     
-    torch.save([gt, preds], f'outputs/{model_short_name}/{save_prefix}open_vocab_predictions.pt')
+    torch.save([gt, preds], f'outputs/algoverse/{model_short_name}/{save_prefix}open_vocab_predictions.pt')
     
 
 if args.in_domain:
     logger.info("------------------------------ Generating In-Domain Emotion Labels using Logits ------------------------------")
     probs = get_emotion_logits(dataloader, tokenizer, model, ids_to_pick=emotions_to_tokenized_ids)
     
-    torch.save([probs.argmax(dim=1), labels[:, 0]], f'outputs/{model_short_name}/{save_prefix}unfiltered_emotion_logits.pt')
+    torch.save([probs.argmax(dim=1), labels[:, 0]], f'outputs/algoverse/{model_short_name}/{save_prefix}unfiltered_emotion_logits.pt')
     
     emotion_labels = [id_to_emotion[i.item()] for i in probs.argmax(dim=1)]
     filtered_train_data = train_data[train_data['emotion'] == emotion_labels]
     logger.info(f"Total mismatched labels: { len(train_data) - len(filtered_train_data)}/{len(train_data)} ({ 1 - len(filtered_train_data) / len(train_data):.2%})")
-    filtered_train_data.to_csv(f'outputs/{model_short_name}/filtered_train_data.csv', index=False)
+    filtered_train_data.to_csv(f'outputs/algoverse/{model_short_name}/filtered_train_data.csv', index=False)
 
 assert HOOKED, "Unhooked models are not supported for the following experiments"
 
 
 try:
-    train_data = pd.read_csv(f'outputs/{model_short_name}/filtered_train_data.csv')
+    train_data = pd.read_csv(f'outputs/algoverse/{model_short_name}/filtered_train_data.csv')
     labels = torch.from_numpy(train_data[['emotion_id'] + appraisals].to_numpy())
 except:
     raise Exception("Filtered train data not found, run the code again with --in_domain enabled")
@@ -219,12 +221,12 @@ if args.bbox_emotion_regression:
     print(f'Emotion Prediction Acc: train {r["accuracy_train"]}, test {r["accuracy_test"]}')
 
     torch.save({'emotion_to_id': emotion_to_id, 'appraisals_to_id': appraisals_to_id, 
-                'labels': labels, 'weights': w, 'bias': b}, f'outputs/{model_short_name}/emotion_appraisal_labels.pt')
+                'labels': labels, 'weights': w, 'bias': b}, f'outputs/algoverse/{model_short_name}/emotion_appraisal_labels.pt')
     
 if args.save_clean_logits:
     logger.info("------------------------------ Saving Original Clean Logits ------------------------------")
     original_logits = get_emotion_logits(dataloader, tokenizer, model, ids_to_pick=emotions_to_tokenized_ids)
-    torch.save(original_logits, f'outputs/{model_short_name}/original_logits.pt')
+    torch.save(original_logits, f'outputs/algoverse/{model_short_name}/original_logits.pt')
 
 if args.extract_hidden_states:
     logger.info("------------------------------ Extracting Hidden States ------------------------------")
@@ -233,7 +235,7 @@ if args.extract_hidden_states:
     extraction_layers = list(range(model.config.num_hidden_layers))
 
     all_hidden_states = extract_hidden_states(dataloader, tokenizer, model, logger, extraction_locs=extraction_locs, extraction_layers=extraction_layers, extraction_tokens = extraction_tokens)
-    # torch.save(all_hidden_states, f'outputs/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    # torch.save(all_hidden_states, f'outputs/algoverse/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
 if args.emotion_probing:
     logger.info("--------------------------------- Emotion Probing ---------------------------------")
@@ -244,7 +246,7 @@ if args.emotion_probing:
 
     if not args.extract_hidden_states:
         try:
-            all_hidden_states = torch.load(f'outputs/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+            all_hidden_states = torch.load(f'outputs/algoverse/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
         except:
             raise Exception("Hidden states not found, run the code again with --extract_hidden_states")
         
@@ -254,22 +256,32 @@ if args.emotion_probing:
 
     results = {}
     for i, layer in tqdm(enumerate (extraction_layers), total=len(extraction_layers)):
+        logger.info(f"Starting binary probes for layer {layer}")
         results[layer] = {}
         for j, loc in enumerate (extraction_locs):
             results[layer][loc] = {}
             for k, token in enumerate (extraction_tokens):
-                # results[layer][loc][token] = probe_classification(all_hidden_states[:, i, j, k], labels[:, 0], return_weights=True)
-                results[layer][loc][token] = probe_binary_relevance(
-                    all_hidden_states[:, i, j, k],
-                    labels[:, 0],
-                    emotions_list=emotions_list,
-                    return_weights=True,
-                    Normalize_X=True,
-                    C_grid=[0.01, 0.1, 1.0, 10.0, 100.0],
-                    max_iter=5000
-                )
+                if args.emotion_probing_binary:
+                    results[layer][loc][token] = probe_binary_relevance(
+                        all_hidden_states[:, i, j, k],
+                        labels[:, 0],
+                        emotions_list=emotions_list,
+                        return_weights=True,
+                        Normalize_X=True,
+                        C_grid=[0.01, 0.1, 1.0, 10.0, 100.0],
+                        max_iter=5000
+                    )
+                else:
+                    results[layer][loc][token] = probe_classification(
+                        all_hidden_states[:, i, j, k],
+                        labels[:, 0],
+                        return_weights=True
+                    )
+        logger.info(f"Finished binary probes for layer {layer}")
 
-    torch.save(results, f'outputs/{model_short_name}/emotion_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    # choose filename based on mode
+    probe_tag = "emotion_probing_binary" if args.emotion_probing_binary else "emotion_probing"
+    torch.save(results, f'outputs/algoverse/{model_short_name}/{probe_tag}_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
 if args.emotion_probing_non_linear:
     logger.info("--------------------------------- Emotion Non-Linear Probing ---------------------------------")
@@ -280,7 +292,7 @@ if args.emotion_probing_non_linear:
 
     if not args.extract_hidden_states:
         try:
-            all_hidden_states = torch.load(f'outputs/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+            all_hidden_states = torch.load(f'outputs/algoverse/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
         except:
             raise Exception("Hidden states not found, run the code again with --extract_hidden_states")
     
@@ -296,7 +308,7 @@ if args.emotion_probing_non_linear:
                 results[layer][loc][token] = probe_classification_non_linear(all_hidden_states[:, i, j, k], labels[:, 0], return_weights=True)
                 
 
-    torch.save(results, f'outputs/{model_short_name}/non_linaer_emotion_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')    
+    torch.save(results, f'outputs/algoverse/{model_short_name}/non_linaer_emotion_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')    
 
 if args.appraisal_probing:
 
@@ -310,7 +322,7 @@ if args.appraisal_probing:
 
     if not args.extract_hidden_states:
             try:
-                all_hidden_states = torch.load(f'outputs/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+                all_hidden_states = torch.load(f'outputs/algoverse/{model_short_name}/hidden_states_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
             except:
                 raise Exception("Hidden states not found, run the code again with --extract_hidden_states")
     
@@ -327,7 +339,7 @@ if args.appraisal_probing:
                                                                        return_weights=True)
 
     torch.save(results,
-               f'outputs/{model_short_name}/appraisal_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+               f'outputs/algoverse/{model_short_name}/appraisal_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
 if args.extract_weights:
     logger.info("------------------------------ Extracting Weights From Probes ------------------------------")
@@ -336,7 +348,7 @@ if args.extract_weights:
     extraction_layers = list(range(model.config.num_hidden_layers))
 
     try:
-        emotion_probing_results = torch.load(f'outputs/{model_short_name}/emotion_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+        emotion_probing_results = torch.load(f'outputs/algoverse/{model_short_name}/{probe_tag}_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
     except:
         raise Exception("Emotion probing results not found, run the code again with --emotion_probing enabled")
     
@@ -350,12 +362,12 @@ if args.extract_weights:
                 emotions_weights_[:, j, k, l, :] = torch.from_numpy(emotion_probing_results[layer][loc][token]['weights'])
                 emotions_biases_[:, j, k, l] = torch.from_numpy(emotion_probing_results[layer][loc][token]['bias'])
 
-    torch.save(emotions_weights_, f'outputs/{model_short_name}/emotions_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    torch.save(emotions_weights_, f'outputs/algoverse/{model_short_name}/emotions_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
-    torch.save(emotions_biases_, f'outputs/{model_short_name}/emotions_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    torch.save(emotions_biases_, f'outputs/algoverse/{model_short_name}/emotions_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
     
     try:
-        appraisal_probing_results = torch.load(f'outputs/{model_short_name}/appraisal_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+        appraisal_probing_results = torch.load(f'outputs/algoverse/{model_short_name}/appraisal_probing_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
     except:
         raise Exception("Appraisal probing results not found, run the code again with --appraisal_probing enabled")
 
@@ -369,8 +381,8 @@ if args.extract_weights:
                     appraisals_weights[i, j, k, l, :] = torch.from_numpy(appraisal_probing_results[app][layer][loc][token]['weights'][0])
                     appraisals_biases[i, j, k, l] = torch.from_numpy(appraisal_probing_results[app][layer][loc][token]['bias'])
 
-    torch.save(appraisals_weights, f'outputs/{model_short_name}/appraisals_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
-    torch.save(appraisals_biases, f'outputs/{model_short_name}/appraisals_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    torch.save(appraisals_weights, f'outputs/algoverse/{model_short_name}/appraisals_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    torch.save(appraisals_biases, f'outputs/algoverse/{model_short_name}/appraisals_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
 if args.zero_intervention:
     logger.info("------------------------------ Performing Zero Intervention ------------------------------")
@@ -388,7 +400,7 @@ if args.zero_intervention:
                                                                             intervention_layers=layers, intervention_locs=loc,
                                                                             intervention_tokens=intervention_tokens, ids_to_pick=emotions_to_tokenized_ids)
 
-            torch.save(intervention_results, f'outputs/{model_short_name}/zero_intervention_results_layers_{intervention_layers}_span_{span}_locs_{loc}_token_{intervention_tokens}.pt')
+            torch.save(intervention_results, f'outputs/algoverse/{model_short_name}/zero_intervention_results_layers_{intervention_layers}_span_{span}_locs_{loc}_token_{intervention_tokens}.pt')
 
 if args.random_intervention:
     logger.info("------------------------------ Performing Random Intervention ------------------------------")
@@ -411,7 +423,7 @@ if args.random_intervention:
                                                                             intervention_layers=layers, intervention_locs=loc,
                                                                             intervention_tokens=intervention_tokens, ids_to_pick=emotions_to_tokenized_ids)
 
-            torch.save(intervention_results, f'outputs/{model_short_name}/random_intervention_results_layers_{intervention_layers}_span_{span}_locs_{loc}_token_{intervention_tokens}_seed_{seed}.pt')
+            torch.save(intervention_results, f'outputs/algoverse/{model_short_name}/random_intervention_results_layers_{intervention_layers}_span_{span}_locs_{loc}_token_{intervention_tokens}_seed_{seed}.pt')
 
 if args.activation_patching:
     logger.info("------------------------------ Performing Activation Patching ------------------------------")
@@ -439,7 +451,7 @@ if args.activation_patching:
                     patching_results[center_layer][i] = activation_patching(source_sentence, target_sentence, tokenizer, model, logger, intervention_layers=layers, intervention_locs=locs, ids_to_pick=emotions_to_tokenized_ids, intervention_tokens=intervention_tokens)
 
 
-            torch.save(patching_results, f'outputs/{model_short_name}/patching_results_layers_{layers_}_locs_{locs}_span_{span}_token_{intervention_tokens}.pt')
+            torch.save(patching_results, f'outputs/algoverse/{model_short_name}/patching_results_layers_{layers_}_locs_{locs}_span_{span}_token_{intervention_tokens}.pt')
 
 if args.attention_weights:
     logger.info("------------------------------ Extracting Attention Weights ------------------------------")
@@ -450,7 +462,7 @@ if args.attention_weights:
     extraction_locs = [10]
     extraction_tokens = [-1]
     results = extract_hidden_states(dataloader_1bs, tokenizer, model, logger, extraction_locs=extraction_locs, extraction_layers=extraction_layers, extraction_tokens = extraction_tokens, do_final_cat = False, return_tokenized_input=True)
-    torch.save(results, f'outputs/{model_short_name}/attention_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
+    torch.save(results, f'outputs/algoverse/{model_short_name}/attention_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt')
 
 if args.clean_probings or args.emotion_promotion or args.appraisal_emotion_promotion or args.appraisal_surgery or args.appraisal_coeff_emotion_promotion or args.random_promotion or args.random_coeff:
     logger.info("------------------------------ Loading Weights ------------------------------")
@@ -458,16 +470,16 @@ if args.clean_probings or args.emotion_promotion or args.appraisal_emotion_promo
     extraction_locs = [3, 6, 7]
     extraction_tokens = [-1]#, -2, -3, -4, -5]
     extraction_layers = list(range(model.config.num_hidden_layers))
-    emotions_weights_ = torch.load(f'outputs/{model_short_name}/emotions_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
-    emotions_biases_ = torch.load(f'outputs/{model_short_name}/emotions_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+    emotions_weights_ = torch.load(f'outputs/algoverse/{model_short_name}/emotions_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+    emotions_biases_ = torch.load(f'outputs/algoverse/{model_short_name}/emotions_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
     
     # Loading appraisals weights
-    appraisals_weights_ = torch.load(f'outputs/{model_short_name}/appraisals_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
-    appraisals_biases_ = torch.load(f'outputs/{model_short_name}/appraisals_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+    appraisals_weights_ = torch.load(f'outputs/algoverse/{model_short_name}/appraisals_weights_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
+    appraisals_biases_ = torch.load(f'outputs/algoverse/{model_short_name}/appraisals_biases_layers_{extraction_layers}_locs_{extraction_locs}_tokens_{extraction_tokens}.pt', weights_only=False)
 
 if args.emotion_promotion:
     logger.info("------------------------------ Emotion Promotion ------------------------------")
-    os.makedirs(f'outputs/{model_short_name}/emotion_promotion/', exist_ok=True)
+    os.makedirs(f'outputs/algoverse/{model_short_name}/emotion_promotion/', exist_ok=True)
     
     promotion_tokens = [-1] #'all' #
     promotion_locs = [[7]] #, [3], [6]
@@ -503,11 +515,11 @@ if args.emotion_promotion:
                                                                                 promotion_layers = layers_with_span, promotion_locs = locs, promotion_tokens = promotion_tokens, 
                                                                                 ids_to_pick = emotions_to_tokenized_ids)
                 
-            torch.save(results,       f'outputs/{model_short_name}/emotion_promotion/emotion_promotion_{emotion_to_promote}_layers_{layers_}_span_{span}_locs_{locs}_tokens_{promotion_tokens}_Beta1_{Beta1}_Beta2_{Beta2}_normalization_{do_normalization}.pt')
+            torch.save(results,       f'outputs/algoverse/{model_short_name}/emotion_promotion/emotion_promotion_{emotion_to_promote}_layers_{layers_}_span_{span}_locs_{locs}_tokens_{promotion_tokens}_Beta1_{Beta1}_Beta2_{Beta2}_normalization_{do_normalization}.pt')
 
 if args.appraisal_surgery:
     logger.info("------------------------------ Appraisal Surgery ------------------------------")
-    os.makedirs(f'outputs/{model_short_name}/appraisal_surgery/', exist_ok=True)
+    os.makedirs(f'outputs/algoverse/{model_short_name}/appraisal_surgery/', exist_ok=True)
     
     surgery_appraisals = [
                           (['pleasantness'], [], [+1]),
@@ -626,4 +638,4 @@ if args.appraisal_surgery:
             appraisals_to_fix = '_'.join(appraisals_to_fix_)
             coeffs = '_'.join([str(c) for c in coeffs_])
             
-            torch.save(results, f'outputs/{model_short_name}/appraisal_surgery/appraisal_surgery_{appraisals_to_change}_fixed_{appraisals_to_fix}_coeffs_{coeffs}_layers_{layers_}_span_{span}_locs_{locs}_tokens_{promotion_tokens}_Beta1_{Beta1}_Beta2_{Beta2}_normalization_{do_normalization}.pt')
+            torch.save(results, f'outputs/algoverse/{model_short_name}/appraisal_surgery/appraisal_surgery_{appraisals_to_change}_fixed_{appraisals_to_fix}_coeffs_{coeffs}_layers_{layers_}_span_{span}_locs_{locs}_tokens_{promotion_tokens}_Beta1_{Beta1}_Beta2_{Beta2}_normalization_{do_normalization}.pt')

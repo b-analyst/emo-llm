@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 
 from sklearn.linear_model import ElasticNet, LogisticRegression, LinearRegression, Ridge
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import mean_squared_error, r2_score, classification_report, accuracy_score
+from sklearn.metrics import mean_squared_error, r2_score, classification_report, accuracy_score, f1_score, roc_auc_score, average_precision_score
 from sklearn.model_selection import cross_val_score, KFold, GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from transformer_lens.hook_points import HookPoint
@@ -259,13 +259,10 @@ def probe(all_hidden_states, labels, appraisals, logger):
     return results
 
 def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weights=False, Normalize_X=False,
-                           C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42):
-    # all_hidden_states: [N, ...features...]; labels: shape (N,) with class ids
-    import numpy as np
-    from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_score
+                           C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42, n_jobs=-1):
+    from sklearn.model_selection import StratifiedKFold
     from sklearn.preprocessing import StandardScaler
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, average_precision_score
+    from sklearn.linear_model import LogisticRegressionCV
 
     if isinstance(all_hidden_states, torch.Tensor):
         X = all_hidden_states.cpu().numpy().reshape(all_hidden_states.shape[0], -1)
@@ -281,70 +278,48 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
         scaler = StandardScaler()
         X = scaler.fit_transform(X)
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state)
 
     per_class = {}
-    W = []
-    b = []
+    W, b = [], []
 
     for cls_idx, cls_name in enumerate(emotions_list):
         y_bin = (y == cls_idx).astype(int)
 
-        base = LogisticRegression(
-            solver='liblinear',  # strong for binary, supports class_weight
-            class_weight='balanced',
-            penalty='l2',
-            max_iter=max_iter,
-            random_state=random_state,
-            fit_intercept=True,
-        )
-        grid = GridSearchCV(
-            base,
-            param_grid={'C': C_grid},
+        best = LogisticRegressionCV(
+            Cs=C_grid,
             cv=skf,
+            solver='liblinear',
+            class_weight='balanced',
             scoring='roc_auc',
-            n_jobs=-1,
-            refit=True,
+            max_iter=max_iter,
+            n_jobs=n_jobs,
+            refit=True,  # LR-CV refits with best C on full data
         )
-        grid.fit(X, y_bin)
-        best = grid.best_estimator_
-
-        # Cross-validated auxiliary metrics with best C
-        cv_pr_auc = cross_val_score(best, X, y_bin, cv=skf, scoring='average_precision').mean()
-        cv_f1 = cross_val_score(best, X, y_bin, cv=skf, scoring='f1').mean()
-
-        # Held-out test split (to mirror probe_regression)
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y_bin, test_size=0.2, stratify=y_bin, random_state=random_state)
-        best.fit(X_tr, y_tr)
-        y_prob_te = best.predict_proba(X_te)[:, 1]
-        y_pred_te = (y_prob_te >= 0.5).astype(int)
-
-        # Train-set summary (refit on full X if you still want train metrics on full data)
         best.fit(X, y_bin)
+
+        # CV AUC (mean over folds, for the positive class if available)
+        key = 1 if 1 in best.scores_ else list(best.scores_.keys())[0]
+        cv_roc_auc = float(best.scores_[key].mean())
+
+        # Train metrics on full data
         y_prob = best.predict_proba(X)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
 
-        metrics = {
-            'cv_roc_auc': float(grid.best_score_),
-            'cv_pr_auc': float(cv_pr_auc),
-            'cv_f1': float(cv_f1),
+        per_class[cls_name] = {
+            'cv_roc_auc': cv_roc_auc,
             'train_accuracy': float(accuracy_score(y_bin, y_pred)),
             'train_f1': float(f1_score(y_bin, y_pred, zero_division=0)),
             'train_roc_auc': float(roc_auc_score(y_bin, y_prob)),
             'train_pr_auc': float(average_precision_score(y_bin, y_prob)),
-            'test_accuracy': float(accuracy_score(y_te, y_pred_te)),
-            'test_f1': float(f1_score(y_te, y_pred_te, zero_division=0)),
-            'test_roc_auc': float(roc_auc_score(y_te, y_prob_te)),
-            'test_pr_auc': float(average_precision_score(y_te, y_prob_te)),
-            'best_C': float(best.C),
+            'best_C': float(best.C_[0]),
         }
-        per_class[cls_name] = metrics
 
         W.append(best.coef_.ravel())
         b.append(float(best.intercept_.ravel()[0]))
 
-    W = np.stack(W, axis=0)  # [num_classes, n_features]
-    b = np.asarray(b)        # [num_classes]
+    W = np.stack(W, axis=0)
+    b = np.asarray(b)
 
     out = {'per_class': per_class}
     if return_weights:
