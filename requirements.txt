@@ -11,3 +11,4 @@ tqdm==4.66.5
 wordcloud==1.9.4
 transformers==4.47.1
 transformer-lens==2.7.0
+wandb

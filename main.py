@@ -43,6 +43,10 @@ parser.add_argument("--attention_weights", action="store_true", default=True, he
 parser.add_argument("--emotion_promotion", action="store_true", default=True, help="Perform emotion promotion")
 parser.add_argument("--appraisal_surgery", action="store_true", default=False, help="Perform appraisal surgery")
 
+parser.add_argument("--wandb", action="store_true", default=True, help="Log metrics to Weights & Biases")
+parser.add_argument("--wandb_project", type=str, default="emo-llm")
+parser.add_argument("--wandb_run", type=str, default=None)
+
 args = parser.parse_args()
 ##############################################################################################
 
@@ -134,6 +138,20 @@ model_classes =     [LlamaForCausalLM, LlamaForCausalLM,
                      Olmo2ForCausalLM, Olmo2ForCausalLM]
 
 model_name, model_short_name, model_class = list(zip(model_names, model_short_names, model_classes))[args.model_index]
+
+if args.wandb:
+    import wandb
+    wandb_run_name = args.wandb_run or f"{model_short_name}-{args.prompt_type}"
+    wandb.init(
+        project=args.wandb_project,
+        name=wandb_run_name,
+        config={
+            'model': model_short_name,
+            'prompt_type': args.prompt_type,
+            'task_type': args.task_type,
+        }
+    )
+    logger.info(f"Wandb run initialized with name: {wandb_run_name}")
 
 save_prefix = ''
 if not HOOKED:
@@ -255,6 +273,7 @@ if args.emotion_probing:
     logger.info(f"Hidden states tensor size: {size_on_memory / (1024 ** 2):.2f} MB")
 
     results = {}
+    global_steps = 0
     for i, layer in tqdm(enumerate (extraction_layers), total=len(extraction_layers)):
         logger.info(f"Starting binary probes for layer {layer}")
         results[layer] = {}
@@ -262,21 +281,56 @@ if args.emotion_probing:
             results[layer][loc] = {}
             for k, token in enumerate (extraction_tokens):
                 if args.emotion_probing_binary:
-                    results[layer][loc][token] = probe_binary_relevance(
+                    res = probe_binary_relevance(
                         all_hidden_states[:, i, j, k],
                         labels[:, 0],
                         emotions_list=emotions_list,
                         return_weights=True,
                         Normalize_X=True,
                         C_grid=[0.01, 0.1, 1.0, 10.0, 100.0],
-                        max_iter=5000
+                        max_iter=5000,
+                        wandb_log=args.wandb,
+                        wandb_context={'layer': layer, 'loc': loc, 'token': token},
                     )
+                    results[layer][loc][token] = res
+
+                    # Log to wandb
+                    if args.wandb:
+                        per_class = res['per_class']
+                        # macro AUC
+                        macro_cv_roc_auc = sum(v['cv_roc_auc'] for v in per_class.values()) / len(per_class)
+                        # one log call with per-class scalars
+                        log_dict = {
+                            'layer': layer,
+                            'loc': loc,
+                            'token': token,
+                            'macro_cv_roc_auc': macro_cv_roc_auc,
+                        }
+                        # add per-class metrics
+                        for cls_name, stats in per_class.items():
+                            log_dict[f'cv_roc_auc/{cls_name}'] = stats['cv_roc_auc']
+                            log_dict[f'best_C/{cls_name}'] = stats['best_C']
+                            # optional: training diagnostics (not for generalization)
+                            log_dict[f'train_f1/{cls_name}'] = stats['train_f1']
+
+                        wandb.log(log_dict, step=global_steps)
+                        global_steps += 1
                 else:
-                    results[layer][loc][token] = probe_classification(
+                    res = probe_classification(
                         all_hidden_states[:, i, j, k],
                         labels[:, 0],
                         return_weights=True
                     )
+                    results[layer][loc][token] = res
+                    if args.wandb:
+                        wandb.log({
+                            'layer': layer,
+                            'loc': loc,
+                            'token': token,
+                            'acc/train': float(res['accuracy_train']),
+                            'acc/test': float(res['accuracy_test']),
+                        }, step=global_steps)
+                        global_steps += 1
         logger.info(f"Finished binary probes for layer {layer}")
 
     # choose filename based on mode
@@ -639,3 +693,6 @@ if args.appraisal_surgery:
             coeffs = '_'.join([str(c) for c in coeffs_])
             
             torch.save(results, f'outputs/algoverse/{model_short_name}/appraisal_surgery/appraisal_surgery_{appraisals_to_change}_fixed_{appraisals_to_fix}_coeffs_{coeffs}_layers_{layers_}_span_{span}_locs_{locs}_tokens_{promotion_tokens}_Beta1_{Beta1}_Beta2_{Beta2}_normalization_{do_normalization}.pt')
+
+if args.wandb:
+    wandb.finish()

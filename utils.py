@@ -259,11 +259,20 @@ def probe(all_hidden_states, labels, appraisals, logger):
     return results
 
 def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weights=False, Normalize_X=False,
-                           C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42, n_jobs=-1):
-    from sklearn.model_selection import StratifiedKFold, GridSearchCV
+                           C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42, n_jobs=-1,
+                           fixed_C=None, wandb_log=False, wandb_context=None, cv_folds=5):
+    from sklearn.model_selection import StratifiedKFold
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
+
+    # optional wandb
+    _wb = None
+    if wandb_log:
+        try:
+            import wandb as _wb  # type: ignore
+        except Exception:
+            _wb = None
 
     if isinstance(all_hidden_states, torch.Tensor):
         X = all_hidden_states.cpu().numpy().reshape(all_hidden_states.shape[0], -1)
@@ -275,57 +284,116 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
     else:
         y = np.asarray(labels)
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
-
     per_class = {}
     W, b = [], []
 
     for cls_idx, cls_name in enumerate(emotions_list):
         y_bin = (y == cls_idx).astype(int)
 
+        # safe folds per class
+        pos = int(y_bin.sum()); neg = int(len(y_bin) - pos)
+        folds = max(2, min(cv_folds, pos, neg))
+        skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
+
+        search_Cs = [fixed_C] if fixed_C is not None else list(C_grid)
+        c_scores = []
+
+        # real-time CV over C
+        for C in search_Cs:
+            fold_scores = []
+            f_idx = 0
+            for tr, va in skf.split(X, y_bin):
+                steps = []
+                if Normalize_X:
+                    steps.append(('scaler', StandardScaler()))
+                steps.append(('clf', LogisticRegression(
+                    solver='lbfgs',
+                    penalty='l2',
+                    class_weight='balanced',
+                    C=C,
+                    max_iter=max_iter,
+                    random_state=random_state,
+                )))
+                pipe = Pipeline(steps)
+                pipe.fit(X[tr], y_bin[tr])
+
+                y_val_prob = pipe.predict_proba(X[va])[:, 1]
+                auc = roc_auc_score(y_bin[va], y_val_prob)
+                fold_scores.append(auc)
+
+                if _wb is not None and _wb.run is not None:
+                    log_row = {
+                        'cv_roc_auc/fold': float(auc),
+                        'C': float(C),
+                        'fold': f_idx,
+                        'emotion': cls_name,
+                    }
+                    if isinstance(wandb_context, dict):
+                        log_row.update(wandb_context)
+                    _wb.log(log_row)
+                f_idx += 1
+
+            mean_auc = float(np.mean(fold_scores))
+            std_auc = float(np.std(fold_scores))
+            c_scores.append((C, mean_auc, std_auc))
+
+            if _wb is not None and _wb.run is not None:
+                log_row = {
+                    'cv_roc_auc/mean': mean_auc,
+                    'cv_roc_auc/std': std_auc,
+                    'C': float(C),
+                    'emotion': cls_name,
+                }
+                if isinstance(wandb_context, dict):
+                    log_row.update(wandb_context)
+                _wb.log(log_row)
+
+        # pick best C (highest mean auc)
+        best_C, best_mean, best_std = max(c_scores, key=lambda t: t[1])
+
+        # refit best on full data for diagnostics/weights
         steps = []
         if Normalize_X:
             steps.append(('scaler', StandardScaler()))
         steps.append(('clf', LogisticRegression(
-            solver='liblinear',
+            solver='lbfgs',
+            penalty='l2',
             class_weight='balanced',
+            C=best_C,
             max_iter=max_iter,
             random_state=random_state,
         )))
-        pipe = Pipeline(steps)
+        best_pipe = Pipeline(steps).fit(X, y_bin)
 
-        param_grid = {'clf__C': C_grid}
-        grid = GridSearchCV(
-            estimator=pipe,
-            param_grid=param_grid,
-            scoring='roc_auc',
-            cv=skf,
-            n_jobs=n_jobs,
-            refit=True,
-            return_train_score=False
-        )
-        grid.fit(X, y_bin)
-
-        # Mean CV AUC at the selected C (no leakage; scaler fit inside each fold)
-        cv_roc_auc = float(grid.best_score_)
-
-        # Train metrics on full data with the refit best estimator
-        y_prob = grid.predict_proba(X)[:, 1]
+        y_prob = best_pipe.predict_proba(X)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
 
         per_class[cls_name] = {
-            'cv_roc_auc': cv_roc_auc,
+            'cv_roc_auc': best_mean,
+            'cv_roc_auc_std': best_std,
             'train_accuracy': float(accuracy_score(y_bin, y_pred)),
             'train_f1': float(f1_score(y_bin, y_pred, zero_division=0)),
             'train_roc_auc': float(roc_auc_score(y_bin, y_prob)),
             'train_pr_auc': float(average_precision_score(y_bin, y_prob)),
-            'best_C': float(grid.best_params_['clf__C']),
+            'best_C': float(best_C),
         }
 
         print(f"{cls_name}: {per_class[cls_name]}")
 
-        W.append(grid.best_estimator_.named_steps['clf'].coef_.ravel())
-        b.append(float(grid.best_estimator_.named_steps['clf'].intercept_.ravel()[0]))
+        clf = best_pipe.named_steps['clf']
+        W.append(clf.coef_.ravel())
+        b.append(float(clf.intercept_.ravel()[0]))
+
+        if _wb is not None and _wb.run is not None:
+            log_row = {
+                'cv_roc_auc/best_mean': best_mean,
+                'cv_roc_auc/best_std': best_std,
+                'best_C': float(best_C),
+                'emotion': cls_name,
+            }
+            if isinstance(wandb_context, dict):
+                log_row.update(wandb_context)
+            _wb.log(log_row)
 
     W = np.stack(W, axis=0)
     b = np.asarray(b)

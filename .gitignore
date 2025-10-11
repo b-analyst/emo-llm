@@ -24,3 +24,4 @@ probe_results/
 experiments/
 experiment/
 *experiment/
+*wandb/
