@@ -258,7 +258,7 @@ def probe(all_hidden_states, labels, appraisals, logger):
 
     return results
 
-def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weights=False, Normalize_X=False,
+def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weights=False, Normalize_X=True,
                            C_grid=[0.01, 0.1, 1.0, 10.0], max_iter=5000, random_state=42, n_jobs=-1,
                            wandb_log=False, wandb_context=None, cv_folds=5):
     from sklearn.model_selection import StratifiedKFold, GridSearchCV
@@ -283,12 +283,19 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
         y = np.asarray(labels)
 
     per_class = {}
-    W_list, B_list = [], []
 
     for cls_idx, cls_name in enumerate(emotions_list):
         y_bin = (y == cls_idx).astype(int)
+        pos = int(y_bin.sum())
+        neg = int(len(y_bin) - pos)
+        print(f"Pos: {pos}, Neg: {neg}")
+        if min(pos, neg) < 2:
+            # not enough data to train/evaluate this class robustly
+            continue
 
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+        splits = min(cv_folds, pos, neg) 
+        print(f"Using {splits} folds for {cls_name}")
+        skf = StratifiedKFold(n_splits=splits, shuffle=True, random_state=random_state)
 
         steps = []
         if Normalize_X:
@@ -298,6 +305,7 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
             penalty='l2',
             class_weight='balanced',
             max_iter=max_iter,
+            tol=1e-3,
             random_state=random_state,
         )))
         pipe = Pipeline(steps)
@@ -318,6 +326,7 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
 
         y_prob = grid.predict_proba(X)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
+        clf = grid.best_estimator_.named_steps['clf']
         entry = {
             'cv_roc_auc': cv_roc_auc,
             'train_accuracy': float(accuracy_score(y_bin, y_pred)),
@@ -325,6 +334,8 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
             'train_roc_auc': float(roc_auc_score(y_bin, y_prob)),
             'train_pr_auc': float(average_precision_score(y_bin, y_prob)),
             'best_C': best_C,
+            "coef": clf.coef_.ravel(),
+            "intercept": clf.intercept_.ravel()[0],
         }
         per_class[cls_name] = entry
         print(f"{cls_name}: {entry}")
@@ -340,12 +351,8 @@ def probe_binary_relevance(all_hidden_states, labels, emotions_list, return_weig
                 log_row.update(wandb_context)
             wandb.log(log_row)  # no explicit step
 
-        clf = grid.best_estimator_.named_steps['clf']
-        W_list.append(clf.coef_.ravel())
-        B_list.append(float(clf.intercept_.ravel()[0]))
-
-    W = np.stack(W_list, axis=0)
-    b = np.asarray(B_list)
+    W = np.stack([entry['coef'] for entry in per_class.values()], axis=0)
+    b = np.asarray([entry['intercept'] for entry in per_class.values()])
 
     out = {'per_class': per_class}
     if return_weights:
@@ -500,7 +507,7 @@ def extract_from_cache(cache_dict_, extraction_layers=[0, 1],
         return_value[-1] = torch.stack(return_value[-1], dim=1)
     return_value = torch.stack(return_value, dim=1)
     return return_value
-        
+
 
 def extract_hidden_states(dataloader, tokenizer, model, logger,
                           extraction_layers=[0, 1],
@@ -548,12 +555,14 @@ def extract_hidden_states(dataloader, tokenizer, model, logger,
             # Extract all token positions since they're all padded to same length
             seq_length = inputs['input_ids'].shape[1]
             current_extraction_tokens = list(range(seq_length))
+            r = extract_from_cache(cache_dict_, extraction_layers=extraction_layers,
+                                   extraction_locs=extraction_locs,
+                                   extraction_tokens=current_extraction_tokens)
         else:
             current_extraction_tokens = extraction_tokens
-
-        r = extract_from_cache(cache_dict_, extraction_layers=extraction_layers,
-                          extraction_locs=extraction_locs,
-                          extraction_tokens=current_extraction_tokens)
+            r = extract_from_cache(cache_dict_, extraction_layers=extraction_layers,
+                                   extraction_locs=extraction_locs,
+                                   extraction_tokens=current_extraction_tokens)
         
         return_values.append(r)
         
